@@ -6,17 +6,17 @@
  ************************************************************************/
 
 #include<stdio.h>
+#include<stdlib.h>
+#include<unistd.h>
 #include<netinet/ip.h>
 #include<netinet/tcp.h>
+#include<netinet/in.h>
+#include<string.h>
+#include<arpa/inet.h>
 #include<pthread.h>
 #include<sys/socket.h>
-#include<sys/types.h>
-
-#define SEND_PACKAGE_SIZE 256
-#define RECV_PACKAGE_SIZE 1024
-#define MIN_TCP_HEADER_SIZE 20
-#define MIN_PSD_HEADER_SIZE 20
-#define SRC_PORT 65531
+#include<ctype.h>
+#include<netdb.h>
 
 
 typedef struct psd_hdr{
@@ -27,35 +27,21 @@ typedef struct psd_hdr{
 	unsigned short tcp_length;	
 }PSD_HEADER;
 
-typedef struct _tcphdr{
-	uint16_t src_port;
-	uint16_t des_port;
-	uint32_t seq;
-	uint32_t ack_seq;
-	uint16_t header_len : 4;
-	uint16_t remain		: 6;
-	union{
-		uint16_t flag	: 6;
-		struct{
-			uint16_t URG		: 1;
-			uint16_t ACK		: 1;
-			uint16_t PSH		: 1;
-			uint16_t RST		: 1;
-			uint16_t SYN		: 1;
-			uint16_t FIN		: 1;
-		};
-	};
-	uint16_t window_size;
-	uint16_t check_sum;
-	uint16_t urp;
-}TCP_HEADER;
+int TCP_HEADER_SIZE = sizeof(struct tcphdr);
+int PSD_HEADER_SIZE = sizeof(PSD_HEADER);
 
-#define TCP_HEADER_SIZE sizeof(TCP_HEADER)
-#define PSD_HEADER_SIZE sizeof(PSD_HEADER)
+#define SEND_PACKAGE_SIZE 256
+#define RECV_PACKAGE_SIZE 1024
+#define MIN_TCP_HEADER_SIZE 20
+#define MIN_PSD_HEADER_SIZE 20
 
-void sendSyn(int port);
+#define SRC_ADDR "127.0.0.1"
+#define SRC_PORT 23
+
+
+void sendSyn(int port, int flags);
 void *recvSynThread();
-uint16_t checkSum(uint16_t *addr, int len);
+unsigned short checkSum(unsigned short *ptr,int nbytes);
 
 struct sockaddr_in dest_addr;
 struct sockaddr_in src_addr;
@@ -63,19 +49,31 @@ static int fd;
 
 int main(int argc, char *argv[]){
 
-	if(argc > 2){
+	//printf("%d %d\n", TCP_HEADER_SIZE, PSD_HEADER_SIZE);
+
+	if(argc > 1){
 		
 		char *input_ip = argv[1];
 
-
 		//fill dest and src socket struct
-		dest_addr.family = AF_INET;
-		dest_addr.sin_addr.s_addr = inet_addr(input_ip);
+		dest_addr.sin_family = AF_INET;
+		if(input_ip[0] >= '0' && input_ip[0] <= '9'){
+			printf("here\n");
+			dest_addr.sin_addr.s_addr = inet_addr(input_ip);
+			printf("addr : %s\n", inet_ntoa(dest_addr.sin_addr));
+		}
+		else{
+			printf("here\n");
+			struct hostent *temp;
+			temp = gethostbyname(input_ip);
+			dest_addr.sin_addr.s_addr = ((struct in_addr *)temp->h_addr_list)->s_addr;
+			printf("addr : %s\n", inet_ntoa(dest_addr.sin_addr));
+		}
 
-		src_addr.family = AF_INET;
-		src_addr.sin_addr.sin_addr = inet_addr("192.168.2.1");
+		src_addr.sin_family = AF_INET;
+		src_addr.sin_addr.s_addr = inet_addr("192.168.2.1");
 
-		fd = sokect(AF_INET, SOCK_RAW, IPPROTO_TCP);
+		fd = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
 
 		if(fd == -1){
 			perror("socket create fail");
@@ -85,13 +83,37 @@ int main(int argc, char *argv[]){
 		int i = 0;
 		pthread_t tid;
 		pthread_create(&tid, NULL, recvSynThread, NULL);
-		for(int i = 0; i < 1024; ++i){
-			sendSyn(i);			
+		for(; i < 1024; ++i){
+			sendSyn(i, 2);			
 		}
 		pthread_join(tid, NULL);
 
 		close(fd);	
 	}else{
+
+		//fill dest and src socket struct
+		dest_addr.sin_family = AF_INET;
+		dest_addr.sin_addr.s_addr = inet_addr(SRC_ADDR);
+
+		src_addr.sin_family = AF_INET;
+		src_addr.sin_addr.s_addr = inet_addr("192.168.2.1");
+
+		fd = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+
+		if(fd == -1){
+			perror("socket create fail");
+			exit(0);
+		}
+
+		int i = 0;
+		pthread_t tid;
+		pthread_create(&tid, NULL, recvSynThread, NULL);
+		for(; i < 1024; ++i){
+			sendSyn(i, 2);			
+		}
+		pthread_join(tid, NULL);
+
+		close(fd);	
 
 	}
 
@@ -102,34 +124,33 @@ void sendSyn(int port, int flags){
 	dest_addr.sin_port = htons(port);
 
 	char package[SEND_PACKAGE_SIZE] = {0};
-	TCP_HEADER tcp;
+	struct tcphdr tcp;
 	PSD_HEADER psd;
 
 	//fill tcp
-	tcp.src_port = htons(SRC_PORT);
-	tcp.des_port = htons(port);
-	tcp.seq = htonl(23333);
-	tcp.ack_seq = 0;
-	tcp.header_len = TCP_HEADER_SIZE;
-	tcp.remain = 0;
+	tcp.th_sport = htons(SRC_PORT);
+	tcp.th_dport = htons(port);
+	tcp.th_seq = htonl(23333);
+	tcp.th_ack = 0;
+	tcp.th_off = TCP_HEADER_SIZE/4;
 	
-	tcp.flag = flags;
+	tcp.th_flags = flags;
 
-	tcp.window_size = htons(16384);
-	tcp.urp = 0;
-	tcp.check_sum = 0;
+	tcp.th_win = htons(16384);
+	tcp.th_urp = 0;
+	tcp.th_sum = 0;
 	//fill psd
 	psd.saddr = src_addr.sin_addr.s_addr;
 	psd.daddr = dest_addr.sin_addr.s_addr;
 	psd.mbz = 0;
 	psd.protocol = IPPROTO_TCP;
-	psd.tcp_length = htons(TCP_HEADER_SIZE)
+	psd.tcp_length = htons(TCP_HEADER_SIZE);
 
 
-	memset(package, &psd, PSD_HEADER_SIZE);
-	memset(package+PSD_HEADER_SIZE, &tcp, TCP_HEADER_SIZE);
+	memcpy(package, &psd, PSD_HEADER_SIZE);
+	memcpy(package+PSD_HEADER_SIZE, &tcp, TCP_HEADER_SIZE);
 
-	tcp.check_sum = checkSum((uint8_t *)package, TCP_HEADER_SIZE+PSD_HEADER_SIZE);
+	tcp.th_sum = checkSum((unsigned short *)package, TCP_HEADER_SIZE+PSD_HEADER_SIZE);
 
 	memcpy(package, &tcp, TCP_HEADER_SIZE);
 
@@ -138,56 +159,57 @@ void sendSyn(int port, int flags){
 	if(ret == -1){
 		perror("send error:");
 		exit(2);
-	}else{
-		printf("send ok\n");
 	}
 }
+
 void *recvSynThread(){
-	TCP_HEADER tcp;
+	struct tcphdr *tcp;
 	char package[RECV_PACKAGE_SIZE];
-	int length = sizeof(src_addr);
+	socklen_t *length = (socklen_t *)sizeof(src_addr);
 	while(1){
 		//wait package
+		printf("run\n");
 		memset(package, 0, RECV_PACKAGE_SIZE);
 		int size = recvfrom(fd, package, RECV_PACKAGE_SIZE, 0, 
-				(struct sockaddr *)&src_addr, &length);
+				(struct sockaddr *)&src_addr, length);
 		if(size == -1){
 			break;
 		}
-		tcp = (TCP_HEADER *)(package + TCP_HEADER_SIZE);
+		tcp = (struct tcphdr *)(package + sizeof(struct iphdr));
 
 		if(size < (MIN_PSD_HEADER_SIZE + MIN_TCP_HEADER_SIZE)){
 			continue;
 		}
-		if(ntohs(tcp->des_port) != SRC_PORT){
+		if(ntohs(tcp->th_dport) != SRC_PORT){
 			continue;
 		}
-		if(tcp.SYN == 1 && tcp.ACK == 1){
-			sendSyn(tcp->src_port, 4);
-			printf("port %d is open! because of ACK AND SYN is true", ntohs(tcp.src_port));
+		if(tcp->syn == 1 && tcp->ack == 1){
+			sendSyn(tcp->th_sport, 4);
+			printf("port %d is open! because of ACK AND SYN is true", ntohs(tcp->th_sport));
 		}
 	}
+	return NULL;
 }
 
-uint16_t checkSum(uint16_t *addr, int len){
-	int sum = 0;
-	int nleft = len;
-	uint8_t answer = 0;
+unsigned short checkSum(unsigned short *ptr,int nbytes) 
+{
+	register long sum;
+	unsigned short oddbyte;
+	register short answer;
 
-	while(nleft > 1){
-		sum += *addr;
-		*addr++;
-		nleft -= 2;
+	sum=0;
+	while(nbytes>1) {
+		sum+=*ptr++;
+		nbytes-=2;
+	}
+	if(nbytes==1) {
+		oddbyte=0;
+		*((u_char*)&oddbyte)=*(u_char*)ptr;
+		sum+=oddbyte;
 	}
 
-	if(nleft == 1){
-		*(uint8_t *)&answer = *(uint8_t *)addr;
-		sum += answer;
-	}
-	
-	sum = (sum >> 16) + (sum & 0xffff);
-	sum += (sum >> 16);
-	answer = ~sum;
-
-	return answer;
-}
+	sum = (sum>>16)+(sum & 0xffff);
+	sum = sum + (sum>>16);
+	answer=(short)~sum;
+	return (answer);
+}	
