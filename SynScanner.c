@@ -35,9 +35,10 @@ int PSD_HEADER_SIZE = sizeof(PSD_HEADER);
 #define MIN_TCP_HEADER_SIZE 20
 #define MIN_PSD_HEADER_SIZE 20
 
-#define SRC_ADDR "127.0.0.1"
+#define SRC_ADDR "192.168.78.130"
 #define SRC_PORT 23
 
+#define DEST_ADDR "192.168.2.1"
 
 void sendSyn(int port, int flags);
 void *recvSynThread();
@@ -93,10 +94,10 @@ int main(int argc, char *argv[]){
 
 		//fill dest and src socket struct
 		dest_addr.sin_family = AF_INET;
-		dest_addr.sin_addr.s_addr = inet_addr(SRC_ADDR);
+		dest_addr.sin_addr.s_addr = inet_addr(DEST_ADDR);
 
 		src_addr.sin_family = AF_INET;
-		src_addr.sin_addr.s_addr = inet_addr("192.168.2.1");
+		src_addr.sin_addr.s_addr = inet_addr(SRC_ADDR);
 
 		fd = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
 
@@ -165,14 +166,15 @@ void sendSyn(int port, int flags){
 void *recvSynThread(){
 	struct tcphdr *tcp;
 	char package[RECV_PACKAGE_SIZE];
-	socklen_t *length = (socklen_t *)sizeof(src_addr);
+	int length = sizeof(src_addr);
+	printf("run\n");
 	while(1){
 		//wait package
-		printf("run\n");
 		memset(package, 0, RECV_PACKAGE_SIZE);
 		int size = recvfrom(fd, package, RECV_PACKAGE_SIZE, 0, 
-				(struct sockaddr *)&src_addr, length);
+				(struct sockaddr *)&src_addr, (socklen_t *)&length);
 		if(size == -1){
+			perror("recvfrom err:");
 			break;
 		}
 		tcp = (struct tcphdr *)(package + sizeof(struct iphdr));
