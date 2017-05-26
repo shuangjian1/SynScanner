@@ -11,10 +11,12 @@
 #include<netinet/ether.h> 
 #include<time.h>
 
-void * receive_ack( void *ptr );
+void *receive_package( void *ptr );
 void process_packet(unsigned char* , int);
-unsigned short csum(unsigned short * , int );
-char * hostname_to_ip(char * );
+unsigned short checkSum(unsigned short * , int );
+char *hostname_to_ip(char * );
+void fillIpHdr(struct iphdr *iphdr_temp, char *datagram);
+void fillTcpHdr(struct tcphdr *tcphdr_temp, char *datagram);
 int get_local_ip (char *);
 
 #define TCPHDR_SIZE sizeof(struct tcphdr)
@@ -34,9 +36,19 @@ struct psdhdr
 };
 
 struct in_addr dest_ip;
+int source_port = 43591;
+char source_ip[20];
 
 int main(int argc, char *argv[])
 {
+	
+	
+	if(argc < 2)
+	{
+		printf("Please specify a hostname \n");
+		exit(1);
+	}
+
 	//Create a raw socket
 	int s = socket (AF_INET, SOCK_RAW ,  htons(ETH_P_IP));
 	if(s < 0)
@@ -63,12 +75,6 @@ int main(int argc, char *argv[])
 	
 	char *target = argv[1];
 	
-	if(argc < 2)
-	{
-		printf("Please specify a hostname \n");
-		exit(1);
-	}
-	
 	if( inet_addr( target ) != -1)
 	{
 		dest_ip.s_addr = inet_addr( target );
@@ -90,8 +96,7 @@ int main(int argc, char *argv[])
 		}
 	}
 	
-	int source_port = 43591;
-	char source_ip[20];
+
 	get_local_ip( source_ip );
 	
 	printf("Local source IP is %s \n" , source_ip);
@@ -99,35 +104,10 @@ int main(int argc, char *argv[])
 	memset (datagram, 0, 4096);	/* zero out the buffer */
 	
 	//Fill in the IP Header
-	iphdr_temp->ihl = 5;
-	iphdr_temp->version = 4;
-	iphdr_temp->tos = 0;
-	iphdr_temp->tot_len = IPHDR_SIZE + TCPHDR_SIZE;
-	iphdr_temp->id = htons (54321);	//Id of this packet
-	iphdr_temp->frag_off = htons(16384);
-	iphdr_temp->ttl = 64;
-	iphdr_temp->protocol = IPPROTO_TCP;
-	iphdr_temp->check = 0;		//Set to 0 before calculating checksum
-	iphdr_temp->saddr = inet_addr ( source_ip );	//Spoof the source ip address
-	iphdr_temp->daddr = dest_ip.s_addr;
-	
-	iphdr_temp->check = csum ((unsigned short *) datagram, iphdr_temp->tot_len >> 1);
+	fillIpHdr(iphdr_temp, datagram);
 	
 	//TCP Header
-	tcphdr_temp->source = htons ( source_port );
-	tcphdr_temp->dest = htons (80);
-	tcphdr_temp->seq = htonl(1105024978);
-	tcphdr_temp->ack_seq = 0;
-	tcphdr_temp->doff = TCPHDR_SIZE / 4;		//Size of tcp header
-	tcphdr_temp->fin=0;
-	tcphdr_temp->syn=1;
-	tcphdr_temp->rst=0;
-	tcphdr_temp->psh=0;
-	tcphdr_temp->ack=0;
-	tcphdr_temp->urg=0;
-	tcphdr_temp->window = htons ( 14600 );	// maximum allowed window size
-	tcphdr_temp->check = 0; //if you set a checksum to zero, your kernel's IP stack should fill in the correct checksum during transmission
-	tcphdr_temp->urg_ptr = 0;
+	fillTcpHdr(tcphdr_temp, datagram);
 	
 	//IP_HDRINCL to tell the kernel that headers are included in the packet
 	int one = 1;
@@ -143,7 +123,7 @@ int main(int argc, char *argv[])
 	char *message1 = "Thread 1";
 	pthread_t sniffer_thread;
 
-	if( pthread_create( &sniffer_thread , NULL ,  receive_ack , (void*) message1) < 0)
+	if( pthread_create( &sniffer_thread , NULL ,  receive_package , (void*) message1) < 0)
 	{
 		printf ("Could not create sniffer thread. Error number : %d . Error message : %s \n" , errno , strerror(errno));
 		exit(0);
@@ -167,7 +147,7 @@ int main(int argc, char *argv[])
 		
 		memcpy(&psh.tcp , tcphdr_temp , TCPHDR_SIZE);
 		
-		tcphdr_temp->check = csum( (unsigned short*) &psh , PSD_SIZE);
+		tcphdr_temp->check = checkSum( (unsigned short*) &psh , PSD_SIZE);
 		
 		//Send the packet
 		if ( sendto (s, datagram , IPHDR_SIZE + TCPHDR_SIZE , 0 , (struct sockaddr *) &dest, sizeof (dest)) < 0)
@@ -182,10 +162,47 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
+//Fill in the IP Header
+void fillIpHdr(struct iphdr* iphdr_temp, char *datagram){
+	
+	iphdr_temp->ihl = 5;
+	iphdr_temp->version = 4;
+	iphdr_temp->tos = 0;
+	iphdr_temp->tot_len = IPHDR_SIZE + TCPHDR_SIZE;
+	iphdr_temp->id = htons (54321);	//Id of this packet
+	iphdr_temp->frag_off = htons(16384);
+	iphdr_temp->ttl = 64;
+	iphdr_temp->protocol = IPPROTO_TCP;
+	iphdr_temp->check = 0;		//Set to 0 before calculating checksum
+	iphdr_temp->saddr = inet_addr ( source_ip );	//Spoof the source ip address
+	iphdr_temp->daddr = dest_ip.s_addr;
+	
+	iphdr_temp->check = checkSum ((unsigned short *) datagram, iphdr_temp->tot_len >> 1);
+}
+
+//fill TCP Header
+void fillTcpHdr(struct tcphdr *tcphdr_temp, char *datagram){
+	tcphdr_temp->source = htons ( source_port );
+	tcphdr_temp->dest = htons (80);
+	tcphdr_temp->seq = htonl(1105024978);
+	tcphdr_temp->ack_seq = 0;
+	tcphdr_temp->doff = TCPHDR_SIZE / 4;		//Size of tcp header
+	tcphdr_temp->fin=0;
+	tcphdr_temp->syn=1;
+	tcphdr_temp->rst=0;
+	tcphdr_temp->psh=0;
+	tcphdr_temp->ack=0;
+	tcphdr_temp->urg=0;
+	tcphdr_temp->window = htons ( 14600 );	// maximum allowed window size
+	tcphdr_temp->check = 0; //if you set a checksum to zero, your kernel's IP stack should fill in the correct checksum during transmission
+	tcphdr_temp->urg_ptr = 0;
+}
+
+
 /*
 	Method to sniff incoming packets and look for Ack replies
 */
-void * receive_ack( void *ptr )
+void * receive_package( void *ptr )
 {
 	//Start the sniffer thing
 	start_sniffer();
@@ -269,7 +286,7 @@ void process_packet(unsigned char* buffer, int size)
 /*
  Checksums - IP and TCP
  */
-unsigned short csum(unsigned short *ptr,int nbytes) 
+unsigned short checkSum(unsigned short *ptr,int nbytes) 
 {
 	register long sum;
 	unsigned short oddbyte;
