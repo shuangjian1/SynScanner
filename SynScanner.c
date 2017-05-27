@@ -20,25 +20,25 @@ struct psdhdr
 	uint8_t placeholder;
 	uint8_t protocol;
 	uint16_t tcp_length;
-	
 	struct tcphdr tcp;
 };
 
-void *receivePackage( void *ptr );
+int start_sniffer();
+void *receivePackage();
 void processPacket(uint8_t* , int);
 uint16_t checkSum(uint16_t * , int );
 char *getHostByName(char * );
 void InitialIpHdr(struct iphdr *iphdr_temp, char *datagram);
 void InitialTcpHdr(struct tcphdr *tcphdr_temp, char *datagram);
 void InitialPSDhdr(struct psdhdr *psh);
-void sendingSynPackage(char *datagram, int port);
+void InitialDestIp(char *target);
+void sendingPackage(int port, int flags);
 int getHostNetIp (char *);
-int start_sniffer();
+
 
 #define TCPHDR_SIZE sizeof(struct tcphdr)
 #define IPHDR_SIZE	sizeof(struct iphdr)
 #define PSD_SIZE	sizeof(struct psdhdr)
-
 
 
 struct in_addr dest_ip;
@@ -48,6 +48,8 @@ int s;
 struct tcphdr *tcphdr_temp;
 int source_port = 43591;
 char source_ip[20];
+//Datagram to represent the packet
+char datagram[4096];	
 
 int main(int argc, char *argv[])
 {
@@ -63,16 +65,10 @@ int main(int argc, char *argv[])
 	s = socket (AF_INET, SOCK_RAW ,  htons(ETH_P_IP));
 	if(s < 0)
 	{
-		printf ("Error creating socket. Error number : %d . Error message : %s \n" , errno , strerror(errno));
+		perror("create socket fails");
 		exit(0);
 	}
-	else
-	{
-		printf("Socket created.\n");
-	}
-		
-	//Datagram to represent the packet
-	char datagram[4096];	
+	
 	
 	//IP header
 	iphdr_temp = (struct iphdr *) datagram;
@@ -82,31 +78,11 @@ int main(int argc, char *argv[])
 	
 	char *target = argv[1];
 	
-	if( inet_addr( target ) != -1)
-	{
-		dest_ip.s_addr = inet_addr( target );
-		printf("Destination IP:%s\n",argv[1]);
-	}
-	else
-	{
-		char *ip = getHostByName(target);
-		if(ip != NULL)
-		{
-			printf("%s resolved to %s \n" , target , ip);
-			//Convert domain name to IP
-			dest_ip.s_addr = inet_addr( getHostByName(target) );
-		}
-		else
-		{
-			printf("Unable to resolve hostname : %s" , target);
-			exit(1);
-		}
-	}
+	InitialDestIp(target);
 	
-
-	getHostNetIp( source_ip );
+	getHostNetIp(source_ip);
 	
-	printf("Local source IP is %s \n" , source_ip);
+	printf("LocalHost Ip address is %s \n" , source_ip);
 	
 	memset (datagram, 0, 4096);	/* zero out the buffer */
 	
@@ -124,25 +100,22 @@ int main(int argc, char *argv[])
 	
 	if (setsockopt (s, IPPROTO_IP, IP_HDRINCL, val, sizeof (one)) < 0)
 	{
-		printf ("Error setting IP_HDRINCL. Error number : %d . Error message : %s \n" , errno , strerror(errno));
+		perror("setting IP_HDRINCL fails:");
 		exit(0);
 	}
 	
-	printf("Starting sniffer thread...\n");
 	pthread_t sniffer_thread;
 
 	if( pthread_create( &sniffer_thread , NULL ,  receivePackage , NULL) < 0)
 	{
-		printf ("Could not create sniffer thread. Error number : %d . Error message : %s \n" , errno , strerror(errno));
+		perror("Create Thread fails:");
 		exit(0);
 	}
-
-	printf("Starting to send syn packets\n");
 	
 	int port;
-	for(port = 1 ; port < 100 ; port++)
+	for(port = 1 ; port < 1024 ; port++)
 	{
-		sendingSynPackage(datagram, port);
+		sendingPackage(port, 0x2);
 	}
 	pthread_join( sniffer_thread , NULL);
 	printf("\nfinish all\n");
@@ -150,10 +123,11 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
-void sendingSynPackage(char *datagram, int port){
+void sendingPackage(int port, int flags){
 	tcphdr_temp->dest = htons ( port );
 	tcphdr_temp->check = 0;	// if you set a checksum to zero, your kernel's IP stack should fill in the correct checksum during transmission
-			
+	tcphdr_temp->th_flags = flags;	
+	
 	memcpy(&psh.tcp , tcphdr_temp , TCPHDR_SIZE);
 		
 	tcphdr_temp->check = checkSum( (uint16_t*) &psh , PSD_SIZE);
@@ -167,6 +141,29 @@ void sendingSynPackage(char *datagram, int port){
 	if ( sendto (s, datagram , IPHDR_SIZE + TCPHDR_SIZE , 0 , (struct sockaddr *) &dest, sizeof (dest)) < 0){
 		printf ("Error sending syn packet. Error number : %d . Error message : %s \n" , errno , strerror(errno));
 		exit(0);
+	}
+}
+
+void InitialDestIp(char *target){
+	if( inet_addr( target ) != -1)
+	{
+		dest_ip.s_addr = inet_addr( target );
+		printf("Dest IP:%s\n",target);
+	}
+	else
+	{
+		char *ip = getHostByName(target);
+		if(ip != NULL)
+		{
+			printf("%s find IP is %s \n" , target , ip);
+			//Convert domain name to IP
+			dest_ip.s_addr = inet_addr( getHostByName(target) );
+		}
+		else
+		{
+			perror("find host fails:");
+			exit(1);
+		}
 	}
 }
 
@@ -203,12 +200,6 @@ void InitialTcpHdr(struct tcphdr *tcphdr_temp, char *datagram){
 	tcphdr_temp->seq = htonl(1105024978);
 	tcphdr_temp->ack_seq = 0;
 	tcphdr_temp->doff = TCPHDR_SIZE / 4;		//Size of tcp header
-	tcphdr_temp->fin=0;
-	tcphdr_temp->syn=1;
-	tcphdr_temp->rst=0;
-	tcphdr_temp->psh=0;
-	tcphdr_temp->ack=0;
-	tcphdr_temp->urg=0;
 	tcphdr_temp->window = htons ( 14600 );	// maximum allowed window size
 	tcphdr_temp->check = 0; //if you set a checksum to zero, your kernel's IP stack should fill in the correct checksum during transmission
 	tcphdr_temp->urg_ptr = 0;
@@ -218,7 +209,7 @@ void InitialTcpHdr(struct tcphdr *tcphdr_temp, char *datagram){
 /*
 	Method to sniff incoming packets and look for Ack replies
 */
-void * receivePackage( void *ptr )
+void * receivePackage()
 {
 	//Start the sniffer thing
 	start_sniffer();
@@ -249,7 +240,7 @@ int start_sniffer()
 	saddr_size = sizeof(saddr);
 	printf("Receive packet\n");
 	
-	for(i=0;i<100;i++)
+	for(i=0;i<1024;i++)
 	{
 		//Receive a packet
 		data_size = recvfrom(sock_raw , buffer , 65536 , 0 , &saddr , &saddr_size);
@@ -293,7 +284,9 @@ void processPacket(uint8_t* buffer, int size)
 		
 		if(tcphdr_temp->syn == 1 && tcphdr_temp->ack == 1 && source.sin_addr.s_addr == dest_ip.s_addr )
 		{
-			printf("Port %d open" , ntohs(tcphdr_temp->source));
+			int port = ntohs(tcphdr_temp->source);
+			printf("\nPort %d open\n" , port);
+			sendingPackage(port, 0x4);
 		}
 	}
 	
