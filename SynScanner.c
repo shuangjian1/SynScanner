@@ -1,5 +1,6 @@
 #include<stdio.h> 
 #include<string.h> 
+#include<unistd.h>
 #include<stdlib.h> 
 #include<sys/socket.h>
 #include<errno.h> 
@@ -11,31 +12,40 @@
 #include<netinet/ether.h> 
 #include<time.h>
 
-void *receive_package( void *ptr );
-void process_packet(unsigned char* , int);
-unsigned short checkSum(unsigned short * , int );
-char *hostname_to_ip(char * );
-void fillIpHdr(struct iphdr *iphdr_temp, char *datagram);
-void fillTcpHdr(struct tcphdr *tcphdr_temp, char *datagram);
-int get_local_ip (char *);
+//use for checkSum
+struct psdhdr   
+{
+	uint32_t source_address;
+	uint32_t dest_address;
+	uint8_t placeholder;
+	uint8_t protocol;
+	uint16_t tcp_length;
+	
+	struct tcphdr tcp;
+};
+
+void *receivePackage( void *ptr );
+void processPacket(uint8_t* , int);
+uint16_t checkSum(uint16_t * , int );
+char *getHostByName(char * );
+void InitialIpHdr(struct iphdr *iphdr_temp, char *datagram);
+void InitialTcpHdr(struct tcphdr *tcphdr_temp, char *datagram);
+void InitialPSDhdr(struct psdhdr *psh);
+void sendingSynPackage(char *datagram, int port);
+int getHostNetIp (char *);
+int start_sniffer();
 
 #define TCPHDR_SIZE sizeof(struct tcphdr)
 #define IPHDR_SIZE	sizeof(struct iphdr)
 #define PSD_SIZE	sizeof(struct psdhdr)
 
-//use for checkSum
-struct psdhdr   
-{
-	unsigned int source_address;
-	unsigned int dest_address;
-	unsigned char placeholder;
-	unsigned char protocol;
-	unsigned short tcp_length;
-	
-	struct tcphdr tcp;
-};
+
 
 struct in_addr dest_ip;
+struct iphdr *iphdr_temp;
+struct psdhdr psh;
+int s;
+struct tcphdr *tcphdr_temp;
 int source_port = 43591;
 char source_ip[20];
 
@@ -50,7 +60,7 @@ int main(int argc, char *argv[])
 	}
 
 	//Create a raw socket
-	int s = socket (AF_INET, SOCK_RAW ,  htons(ETH_P_IP));
+	s = socket (AF_INET, SOCK_RAW ,  htons(ETH_P_IP));
 	if(s < 0)
 	{
 		printf ("Error creating socket. Error number : %d . Error message : %s \n" , errno , strerror(errno));
@@ -65,13 +75,10 @@ int main(int argc, char *argv[])
 	char datagram[4096];	
 	
 	//IP header
-	struct iphdr *iphdr_temp = (struct iphdr *) datagram;
+	iphdr_temp = (struct iphdr *) datagram;
 	
 	//TCP header
-	struct tcphdr *tcphdr_temp = (struct tcphdr *) (datagram + IPHDR_SIZE);
-	
-	struct sockaddr_in  dest;
-	struct psdhdr psh;
+	tcphdr_temp = (struct tcphdr *) (datagram + IPHDR_SIZE);
 	
 	char *target = argv[1];
 	
@@ -82,12 +89,12 @@ int main(int argc, char *argv[])
 	}
 	else
 	{
-		char *ip = hostname_to_ip(target);
+		char *ip = getHostByName(target);
 		if(ip != NULL)
 		{
 			printf("%s resolved to %s \n" , target , ip);
 			//Convert domain name to IP
-			dest_ip.s_addr = inet_addr( hostname_to_ip(target) );
+			dest_ip.s_addr = inet_addr( getHostByName(target) );
 		}
 		else
 		{
@@ -97,18 +104,20 @@ int main(int argc, char *argv[])
 	}
 	
 
-	get_local_ip( source_ip );
+	getHostNetIp( source_ip );
 	
 	printf("Local source IP is %s \n" , source_ip);
 	
 	memset (datagram, 0, 4096);	/* zero out the buffer */
 	
 	//Fill in the IP Header
-	fillIpHdr(iphdr_temp, datagram);
+	InitialIpHdr(iphdr_temp, datagram);
 	
 	//TCP Header
-	fillTcpHdr(tcphdr_temp, datagram);
+	InitialTcpHdr(tcphdr_temp, datagram);
 	
+	InitialPSDhdr(&psh);
+
 	//IP_HDRINCL to tell the kernel that headers are included in the packet
 	int one = 1;
 	const int *val = &one;
@@ -120,10 +129,9 @@ int main(int argc, char *argv[])
 	}
 	
 	printf("Starting sniffer thread...\n");
-	char *message1 = "Thread 1";
 	pthread_t sniffer_thread;
 
-	if( pthread_create( &sniffer_thread , NULL ,  receive_package , (void*) message1) < 0)
+	if( pthread_create( &sniffer_thread , NULL ,  receivePackage , NULL) < 0)
 	{
 		printf ("Could not create sniffer thread. Error number : %d . Error message : %s \n" , errno , strerror(errno));
 		exit(0);
@@ -132,29 +140,9 @@ int main(int argc, char *argv[])
 	printf("Starting to send syn packets\n");
 	
 	int port;
-	dest.sin_family = AF_INET;
-	dest.sin_addr.s_addr = dest_ip.s_addr;
 	for(port = 1 ; port < 100 ; port++)
 	{
-		tcphdr_temp->dest = htons ( port );
-		tcphdr_temp->check = 0;	// if you set a checksum to zero, your kernel's IP stack should fill in the correct checksum during transmission
-		
-		psh.source_address = inet_addr( source_ip );
-		psh.dest_address = dest.sin_addr.s_addr;
-		psh.placeholder = 0;
-		psh.protocol = IPPROTO_TCP;
-		psh.tcp_length = htons( TCPHDR_SIZE );
-		
-		memcpy(&psh.tcp , tcphdr_temp , TCPHDR_SIZE);
-		
-		tcphdr_temp->check = checkSum( (unsigned short*) &psh , PSD_SIZE);
-		
-		//Send the packet
-		if ( sendto (s, datagram , IPHDR_SIZE + TCPHDR_SIZE , 0 , (struct sockaddr *) &dest, sizeof (dest)) < 0)
-		{
-			printf ("Error sending syn packet. Error number : %d . Error message : %s \n" , errno , strerror(errno));
-			exit(0);
-		}
+		sendingSynPackage(datagram, port);
 	}
 	pthread_join( sniffer_thread , NULL);
 	printf("\nfinish all\n");
@@ -162,8 +150,36 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
+void sendingSynPackage(char *datagram, int port){
+	tcphdr_temp->dest = htons ( port );
+	tcphdr_temp->check = 0;	// if you set a checksum to zero, your kernel's IP stack should fill in the correct checksum during transmission
+			
+	memcpy(&psh.tcp , tcphdr_temp , TCPHDR_SIZE);
+		
+	tcphdr_temp->check = checkSum( (uint16_t*) &psh , PSD_SIZE);
+	
+	struct sockaddr_in dest;
+
+	dest.sin_family = AF_INET;
+	dest.sin_addr.s_addr = dest_ip.s_addr; 
+
+		//Send the packet
+	if ( sendto (s, datagram , IPHDR_SIZE + TCPHDR_SIZE , 0 , (struct sockaddr *) &dest, sizeof (dest)) < 0){
+		printf ("Error sending syn packet. Error number : %d . Error message : %s \n" , errno , strerror(errno));
+		exit(0);
+	}
+}
+
+void InitialPSDhdr(struct psdhdr *psh){
+	psh->source_address = inet_addr( source_ip );
+	psh->dest_address = dest_ip.s_addr;
+	psh->placeholder = 0;
+	psh->protocol = IPPROTO_TCP;
+	psh->tcp_length = htons( TCPHDR_SIZE );
+}
+
 //Fill in the IP Header
-void fillIpHdr(struct iphdr* iphdr_temp, char *datagram){
+void InitialIpHdr(struct iphdr* iphdr_temp, char *datagram){
 	
 	iphdr_temp->ihl = 5;
 	iphdr_temp->version = 4;
@@ -177,11 +193,11 @@ void fillIpHdr(struct iphdr* iphdr_temp, char *datagram){
 	iphdr_temp->saddr = inet_addr ( source_ip );	//Spoof the source ip address
 	iphdr_temp->daddr = dest_ip.s_addr;
 	
-	iphdr_temp->check = checkSum ((unsigned short *) datagram, iphdr_temp->tot_len >> 1);
+	iphdr_temp->check = checkSum ((uint16_t *) datagram, iphdr_temp->tot_len >> 1);
 }
 
 //fill TCP Header
-void fillTcpHdr(struct tcphdr *tcphdr_temp, char *datagram){
+void InitialTcpHdr(struct tcphdr *tcphdr_temp, char *datagram){
 	tcphdr_temp->source = htons ( source_port );
 	tcphdr_temp->dest = htons (80);
 	tcphdr_temp->seq = htonl(1105024978);
@@ -202,7 +218,7 @@ void fillTcpHdr(struct tcphdr *tcphdr_temp, char *datagram){
 /*
 	Method to sniff incoming packets and look for Ack replies
 */
-void * receive_package( void *ptr )
+void * receivePackage( void *ptr )
 {
 	//Start the sniffer thing
 	start_sniffer();
@@ -215,7 +231,7 @@ int start_sniffer()
 	int saddr_size , data_size;
 	struct sockaddr saddr;	
 	
-	unsigned char *buffer = (unsigned char *)malloc(65536); //Its Big!
+	uint8_t *buffer = (uint8_t *)malloc(65536); //Its Big!
 	
 	printf("Sniffer initialising...\n");
 	fflush(stdout);
@@ -246,7 +262,7 @@ int start_sniffer()
 		}
 		
 		//Now process the packet
-		process_packet(buffer , data_size);
+		processPacket(buffer , data_size);
 		fflush(stdout);
 	}
 	
@@ -256,12 +272,12 @@ int start_sniffer()
 	return 0;
 }
 
-void process_packet(unsigned char* buffer, int size)
+void processPacket(uint8_t* buffer, int size)
 {
 	//Get the IP Header part of this packet
 	struct iphdr *iphdr_temp = (struct iphdr*)buffer;
 	struct sockaddr_in source,dest;
-	unsigned short iphdr_len;
+	uint16_t iphdr_len;
 	if(iphdr_temp->protocol == 6)
 	{
 		struct iphdr *iphdr_temp = (struct iphdr *)buffer;
@@ -286,10 +302,10 @@ void process_packet(unsigned char* buffer, int size)
 /*
  Checksums - IP and TCP
  */
-unsigned short checkSum(unsigned short *ptr,int nbytes) 
+uint16_t checkSum(uint16_t *ptr,int nbytes) 
 {
 	register long sum;
-	unsigned short oddbyte;
+	uint16_t oddbyte;
 	register short answer;
 
 	sum=0;
@@ -313,7 +329,7 @@ unsigned short checkSum(unsigned short *ptr,int nbytes)
 /*
 	Get ip from domain name
  */
-char* hostname_to_ip(char * hostname)
+char* getHostByName(char * hostname)
 {
 	struct hostent *he;
 	struct in_addr **addr_list;
@@ -342,7 +358,7 @@ char* hostname_to_ip(char * hostname)
  Get source IP of system , like 192.168.0.6 or 192.168.1.2
  */
 
-int get_local_ip ( char * buffer)
+int getHostNetIp ( char * buffer)
 {
 	int sock = socket ( AF_INET, SOCK_DGRAM, 0);
 
